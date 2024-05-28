@@ -1,8 +1,8 @@
-import { Hono } from "hono";
+import { createBlogInput, updateBlogInput } from "@nilesh_bhoi/medium-common";
 import { PrismaClient } from "@prisma/client/edge";
 import { withAccelerate } from "@prisma/extension-accelerate";
+import { Hono } from "hono";
 import { verify } from "hono/jwt";
-import { createPostInput, updatePostInput } from "@nilesh_bhoi/medium-common";
 
 export const blogRouter = new Hono<{
     Bindings: {
@@ -14,66 +14,31 @@ export const blogRouter = new Hono<{
     };
 }>();
 
-// middleware
 blogRouter.use("/*", async (c, next) => {
-    console.log("hello from the middleware");
-    const jwt = c.req.header("Authorization") || "";
-    console.log("jwt: ", jwt);
-    if (!jwt) {
-        c.status(401);
-        return c.json({ error: "unauthorized" });
-    }
-    const token = jwt.split(" ")[1];
-
-    console.log("token: ", token);
-
-    const payload = await verify(token, c.env.JWT_SECRET);
-    if (!payload) {
-        c.status(403);
-        return c.json({ error: "unauthorized" });
-    }
-
-    //@ts-ignore
-    c.set("userId", payload.id);
-
-    await next();
-});
-
-// ideally should add pagination to this endpoint, should not return all the posts can be too much 10^9
-blogRouter.get("/bulk", async (c) => {
-    const prisma = new PrismaClient({
-        datasourceUrl: c.env?.DATABASE_URL,
-    }).$extends(withAccelerate());
-
-    const posts = await prisma.post.findMany();
-    return c.json({ posts });
-});
-
-blogRouter.get("/:id", async (c) => {
-    const prisma = new PrismaClient({
-        datasourceUrl: c.env?.DATABASE_URL,
-    }).$extends(withAccelerate());
-
-    const id = c.req.param("id");
-
+    const authHeader = c.req.header("authorization") || "";
     try {
-        const post = await prisma.post.findFirst({
-            where: {
-                id: id,
-            },
-        });
-        return c.json({ post });
-    } catch (error) {
-        c.status(404);
+        const user = await verify(authHeader, c.env.JWT_SECRET);
+        if (user) {
+            //@ts-ignore
+            c.set("userId", user.id);
+            await next();
+        } else {
+            c.status(403);
+            return c.json({
+                message: "You are not logged in",
+            });
+        }
+    } catch (e) {
+        c.status(403);
         return c.json({
-            error: "Error while fetching the post",
+            message: "You are not logged in",
         });
     }
 });
 
-blogRouter.post("/post", async (c) => {
+blogRouter.post("/", async (c) => {
     const body = await c.req.json();
-    const { success } = createPostInput.safeParse(body);
+    const { success } = createBlogInput.safeParse(body);
     if (!success) {
         c.status(411);
         return c.json({
@@ -81,46 +46,27 @@ blogRouter.post("/post", async (c) => {
         });
     }
 
+    const authorId = c.get("userId");
     const prisma = new PrismaClient({
-        datasourceUrl: c.env?.DATABASE_URL,
+        datasourceUrl: c.env.DATABASE_URL,
     }).$extends(withAccelerate());
 
-    const userId = c.get("userId"); // taken care by middleware as the token is passed it will set it
+    const blog = await prisma.blog.create({
+        data: {
+            title: body.title,
+            content: body.content,
+            authorId: Number(authorId),
+        },
+    });
 
-    try {
-        const post = await prisma.post.create({
-            data: {
-                title: body.title,
-                content: body.content,
-                authorId: userId,
-            },
-        });
-
-        return c.json({ id: post.id });
-    } catch (error) {
-        c.status(403);
-        return c.json({ userId, body, error });
-    }
+    return c.json({
+        id: blog.id,
+    });
 });
-
-// blogRouter.delete("/delete/:id", async (c) => {
-//     const prisma = new PrismaClient({
-//         datasourceUrl: c.env?.DATABASE_URL,
-//     }).$extends(withAccelerate());
-//     const postID = JSON.stringify(c.req.param("id"));
-//     console.log("ID of the post to be deleted: ", postID);
-//     const post = await prisma.post.delete({
-//         where: {
-//             id: "54d53151-ce13-49f1-9f61-b5d4bbaed806",
-//         },
-//     });
-//     return c.json({ id: post.id });
-// });
 
 blogRouter.put("/", async (c) => {
     const body = await c.req.json();
-    const { success } = updatePostInput.safeParse(body);
-
+    const { success } = updateBlogInput.safeParse(body);
     if (!success) {
         c.status(411);
         return c.json({
@@ -129,22 +75,77 @@ blogRouter.put("/", async (c) => {
     }
 
     const prisma = new PrismaClient({
-        datasourceUrl: c.env?.DATABASE_URL,
+        datasourceUrl: c.env.DATABASE_URL,
     }).$extends(withAccelerate());
 
-    const authorId = c.get("userId");
-
-    const post = await prisma.post.update({
+    const blog = await prisma.blog.update({
         where: {
             id: body.id,
-            authorId: authorId,
         },
         data: {
             title: body.title,
             content: body.content,
-            published: true,
         },
     });
 
-    return c.json({ id: post.id });
+    return c.json({
+        id: blog.id,
+    });
+});
+
+// Todo: add pagination
+blogRouter.get("/bulk", async (c) => {
+    const prisma = new PrismaClient({
+        datasourceUrl: c.env.DATABASE_URL,
+    }).$extends(withAccelerate());
+    const blogs = await prisma.blog.findMany({
+        select: {
+            content: true,
+            title: true,
+            id: true,
+            author: {
+                select: {
+                    name: true,
+                },
+            },
+        },
+    });
+
+    return c.json({
+        blogs,
+    });
+});
+
+blogRouter.get("/:id", async (c) => {
+    const id = c.req.param("id");
+    const prisma = new PrismaClient({
+        datasourceUrl: c.env.DATABASE_URL,
+    }).$extends(withAccelerate());
+
+    try {
+        const blog = await prisma.blog.findFirst({
+            where: {
+                id: Number(id),
+            },
+            select: {
+                id: true,
+                title: true,
+                content: true,
+                author: {
+                    select: {
+                        name: true,
+                    },
+                },
+            },
+        });
+
+        return c.json({
+            blog,
+        });
+    } catch (e) {
+        c.status(411); // 4
+        return c.json({
+            message: "Error while fetching blog post",
+        });
+    }
 });
